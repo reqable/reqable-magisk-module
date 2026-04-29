@@ -48,6 +48,10 @@ if [ -d /apex/com.android.conscrypt/cacerts ]; then
     else
         echo "Cancelling replacing CA storage due to safety"
     fi
+    for pid in 1 $(pgrep zygote) $(pgrep zygote64); do
+        nsenter --mount=/proc/${pid}/ns/mnt -- \
+            umount /data/local/tmp/sys-ca-copy
+    done
     umount /data/local/tmp/sys-ca-copy
     rmdir /data/local/tmp/sys-ca-copy
 fi
