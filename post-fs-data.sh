@@ -6,6 +6,7 @@ exec 2>&1
 set -x
 
 MODDIR=${0%/*}
+CERT_DIR="${MODDIR}/system/etc/security/cacerts"
 
 set_context() {
     [ "$(getenforce)" = "Enforcing" ] || return 0
@@ -20,47 +21,22 @@ set_context() {
     fi
 }
 
-merge_ca_certs() {
-    target_path="$1"
-    tmpfs_path="$2"
-
-    rm -f "${tmpfs_path}"
-    mkdir -p "${tmpfs_path}"
-    mount -t tmpfs tmpfs "${tmpfs_path}"
-    cp -f "${target_path}"/* "${tmpfs_path}/"
-
-    cp -f ${MODDIR}/system/etc/security/cacerts/* "${tmpfs_path}"
-    chown -R 0:0 "${tmpfs_path}"
-    set_context "${target_path}" "${tmpfs_path}"
-
-    CERTS_NUM="$(ls -1 "${tmpfs_path}" | wc -l)"
-    if [ "$CERTS_NUM" -gt 10 ]; then
-        mount --bind "${tmpfs_path}" "${target_path}"
-        for pid in 1 $(pgrep zygote) $(pgrep zygote64); do
-            nsenter --mount=/proc/${pid}/ns/mnt -- \
-                mount --bind "${tmpfs_path}" "${target_path}"
-        done
-    else
-        echo "Cancelling replacing ${target_path} due to safety"
-    fi
-    for pid in 1 $(pgrep zygote) $(pgrep zygote64); do
-        nsenter --mount=/proc/${pid}/ns/mnt -- \
-            umount "${tmpfs_path}"
-    done
-    umount "${tmpfs_path}"
-    rmdir "${tmpfs_path}"
-}
-
-chown -R 0:0 ${MODDIR}/system/etc/security/cacerts
-set_context /system/etc/security/cacerts ${MODDIR}/system/etc/security/cacerts
+chown -R 0:0 "${CERT_DIR}"
+set_context /system/etc/security/cacerts "${CERT_DIR}"
 
 # Android 14+ APEX Conscrypt store
 # Since Magisk ignores /apex for module file injections, use non-Magisk way
 if [ -d /apex/com.android.conscrypt/cacerts ]; then
-    merge_ca_certs /apex/com.android.conscrypt/cacerts /data/local/tmp/sys-ca-copy
-fi
+    apex_target=/apex/com.android.conscrypt/cacerts
+    bind_dir="${MODDIR}/.bind_apex"
 
-# System CA store (for Flutter/dart:io HttpClient and other legacy clients)
-if [ -d /system/etc/security/cacerts ]; then
-    merge_ca_certs /system/etc/security/cacerts /data/local/tmp/sys-ca-copy-system
+    rm -rf "${bind_dir}"
+    mkdir -p "${bind_dir}"
+    cp -f "${apex_target}"/* "${bind_dir}/"
+    cp -f "${CERT_DIR}"/* "${bind_dir}/"
+    chown -R 0:0 "${bind_dir}"
+    set_context "${apex_target}" "${bind_dir}"
+
+    mount --bind "${bind_dir}" "${apex_target}"
+    mount -o remount,ro,bind "${apex_target}"
 fi
