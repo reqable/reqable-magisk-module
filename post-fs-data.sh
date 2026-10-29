@@ -2,65 +2,58 @@
 
 exec > /data/local/tmp/CustomCACert.log
 exec 2>&1
-
 set -x
 
 MODDIR=${0%/*}
+CERT_DIR="${MODDIR}/system/etc/security/cacerts"
+SYS_TARGET="/system/etc/security/cacerts"
+APEX_TARGET="/apex/com.android.conscrypt/cacerts"
+
+# 检查是否有 .0 证书文件，没有则直接退出，防止空挂载导致断网
+if ! ls "${CERT_DIR}"/*.0 >/dev/null 2>&1; then
+    echo "No .0 certificate found in ${CERT_DIR}, exiting."
+    exit 0
+fi
 
 set_context() {
     [ "$(getenforce)" = "Enforcing" ] || return 0
-
-    default_selinux_context=u:object_r:system_file:s0
-    selinux_context=$(ls -Zd $1 | awk '{print $1}')
+    default_selinux_context=u:object_r:system_security_cacerts_file:s0
+    selinux_context=$(ls -Zd "$1" | awk '{print $1}')
 
     if [ -n "$selinux_context" ] && [ "$selinux_context" != "?" ]; then
-        chcon -R $selinux_context $2
+        chcon -R "$selinux_context" "$2"
     else
-        chcon -R $default_selinux_context $2
+        chcon -R "$default_selinux_context" "$2"
     fi
 }
 
-merge_ca_certs() {
-    target_path="$1"
-    tmpfs_path="$2"
+TMP_DIR="/dev/reqable_cacerts"
+rm -rf "${TMP_DIR}"
+mkdir -p "${TMP_DIR}"
+mount -t tmpfs tmpfs "${TMP_DIR}"
 
-    rm -f "${tmpfs_path}"
-    mkdir -p "${tmpfs_path}"
-    mount -t tmpfs tmpfs "${tmpfs_path}"
-    cp -f "${target_path}"/* "${tmpfs_path}/"
-
-    cp -f ${MODDIR}/system/etc/security/cacerts/* "${tmpfs_path}"
-    chown -R 0:0 "${tmpfs_path}"
-    set_context "${target_path}" "${tmpfs_path}"
-
-    CERTS_NUM="$(ls -1 "${tmpfs_path}" | wc -l)"
-    if [ "$CERTS_NUM" -gt 10 ]; then
-        mount --bind "${tmpfs_path}" "${target_path}"
-        for pid in 1 $(pgrep zygote) $(pgrep zygote64); do
-            nsenter --mount=/proc/${pid}/ns/mnt -- \
-                mount --bind "${tmpfs_path}" "${target_path}"
-        done
-    else
-        echo "Cancelling replacing ${target_path} due to safety"
-    fi
-    for pid in 1 $(pgrep zygote) $(pgrep zygote64); do
-        nsenter --mount=/proc/${pid}/ns/mnt -- \
-            umount "${tmpfs_path}"
-    done
-    umount "${tmpfs_path}"
-    rmdir "${tmpfs_path}"
-}
-
-chown -R 0:0 ${MODDIR}/system/etc/security/cacerts
-set_context /system/etc/security/cacerts ${MODDIR}/system/etc/security/cacerts
-
-# Android 14+ APEX Conscrypt store
-# Since Magisk ignores /apex for module file injections, use non-Magisk way
-if [ -d /apex/com.android.conscrypt/cacerts ]; then
-    merge_ca_certs /apex/com.android.conscrypt/cacerts /data/local/tmp/sys-ca-copy
+if [ -d "${APEX_TARGET}" ]; then
+    cp -f "${APEX_TARGET}"/* "${TMP_DIR}/"
+else
+    cp -f "${SYS_TARGET}"/* "${TMP_DIR}/"
 fi
 
-# System CA store (for Flutter/dart:io HttpClient and other legacy clients)
-if [ -d /system/etc/security/cacerts ]; then
-    merge_ca_certs /system/etc/security/cacerts /data/local/tmp/sys-ca-copy-system
+# 仅复制 .0 结尾的合法证书文件，过滤掉 .gitkeep 或 ._ 隐藏垃圾文件
+cp -f "${CERT_DIR}"/*.0 "${TMP_DIR}/"
+
+chown -R 0:0 "${TMP_DIR}"
+chmod 755 "${TMP_DIR}"
+chmod 644 "${TMP_DIR}"/*
+set_context "${SYS_TARGET}" "${TMP_DIR}"
+
+mount --bind "${TMP_DIR}" "${SYS_TARGET}"
+nsenter --mount=/proc/1/ns/mnt -- /bin/mount --bind "${TMP_DIR}" "${SYS_TARGET}" 2>/dev/null
+
+if [ -d "${APEX_TARGET}" ]; then
+    set_context "${APEX_TARGET}" "${TMP_DIR}"
+    mount --bind "${TMP_DIR}" "${APEX_TARGET}"
+    nsenter --mount=/proc/1/ns/mnt -- /bin/mount --bind "${TMP_DIR}" "${APEX_TARGET}" 2>/dev/null
 fi
+
+umount -l "${TMP_DIR}"
+rmdir "${TMP_DIR}"
